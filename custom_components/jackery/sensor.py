@@ -1466,23 +1466,29 @@ class JackeryDataCoordinator:
                 if msg_code == 23 and isinstance(body, dict):
                     device_sn_in_body = body.get("deviceSn")
                     dev_type_in_body = body.get("devType")
-                    if device_sn_in_body == "system" or device_sn_in_body is None:
+                    # Use _subdevice_sn to support both deviceSn and sn fields.
+                    # Devices with different firmware may use sn-only payloads.
+                    child_sn = _subdevice_sn(body)
+                    is_expansion = dev_type_in_body == 1 and child_sn is not None
+                    is_sn_only_expansion = device_sn_in_body is None and is_expansion
+                    if (device_sn_in_body == "system" or device_sn_in_body is None) and not is_sn_only_expansion:
                         # Merge into main device cache
                         self._merge_normalized_cache(body)
-                    elif dev_type_in_body == 1:
-                        # Expansion battery (e.g. BP2500) — not in type-101, store separately
+                    elif is_expansion:
+                        # Expansion battery (e.g. BP2500) — not in type-101, store separately.
+                        # Use child_sn (deviceSn or sn) so sn-only payloads are routed correctly.
                         exp_bats = self._data_cache.setdefault("expansion_batteries", {})
-                        if device_sn_in_body not in exp_bats:
-                            exp_bats[device_sn_in_body] = {}
+                        if child_sn not in exp_bats:
+                            exp_bats[child_sn] = {}
                         # Only update with non-null values to preserve previously cached real data.
                         # Devices occasionally send null for energy fields (e.g. during a restart);
                         # overwriting with null would cause sensors to show "unknown" until the
                         # next type-23 arrives (~10 min later).
                         for k, v in body.items():
                             if v is not None:
-                                exp_bats[device_sn_in_body][k] = v
+                                exp_bats[child_sn][k] = v
                         # Update last_seen so offline detection doesn't mark them unavailable
-                        self._subdevice_last_seen[device_sn_in_body] = time.time()
+                        self._subdevice_last_seen[child_sn] = time.time()
                         self._check_for_new_expansion_batteries()
                     else:
                         # Find and update sub-device in cache (CTs, SmartMeter)
