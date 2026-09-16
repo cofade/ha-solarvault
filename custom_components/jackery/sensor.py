@@ -1519,6 +1519,7 @@ class JackeryDataCoordinator:
                     elif is_expansion:
                         # Expansion battery (e.g. BP2500) — not in type-101, store separately.
                         # Use child_sn (deviceSn or sn) so sn-only payloads are routed correctly.
+                        assert child_sn is not None  # guaranteed by is_expansion
                         exp_bats = self._data_cache.setdefault("expansion_batteries", {})
                         if child_sn not in exp_bats:
                             exp_bats[child_sn] = {}
