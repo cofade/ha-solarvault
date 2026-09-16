@@ -230,6 +230,23 @@ Every push and pull request runs three GitHub Actions jobs automatically:
 
 ---
 
+### What's new in v2.4.1
+
+#### Robustness fixes backported from community fork analysis
+
+This release contains 8 bug fixes identified by analysing a community fork of the integration. All fixes address scenarios that affect any supported hardware, not just specific configurations.
+
+- **HTTP-polling users: no more `AttributeError` on every MQTT message** — `JackerySmartMeterHttpSensor` does not implement `_update_from_coordinator`; the coordinator now uses a callable guard before dispatching MQTT data.
+- **Foreign MQTT messages no longer reset the "data received" watchdog** — `_last_update_time` and `_ever_received` are now set only after the full message (SN, JSON structure, body type) has been validated.
+- **Topic matching is now exact** — replaced `re.search` with `re.fullmatch` + `re.escape` to prevent regex meta-characters in topic names from matching unintended topics.
+- **Sub-device entity lookup no longer returns false positives** — `_entity_keys_for_subdevice` now uses attribute lookup (`_plug_sn` / `_sm_sn`) instead of substring matching, which could produce false results when one serial number was a substring of another.
+- **MQTT listeners no longer accumulate across HA reloads** — `async_subscribe()` unsubscribe callbacks are now stored and called in `async_stop()`. Previously a new listener was added on every reload without cancelling the old one.
+- **Non-numeric device data no longer crashes switch/number entities** — `bool(int(val))` in `switch.py` and `float()` in `number.py` are now wrapped in `try/except`.
+- **`_subdevice_sn` type guard** — returns only string values; integer or `None` SNs from malformed payloads are rejected.
+- **Body sub-device arrays sanitized** — non-dict items and items with invalid serial numbers in `plugs`/`cts`/`collectors` arrays are filtered out after validation.
+
+---
+
 ### What's new in v2.4.0
 
 #### Options Flow: token/prefix reconfiguration + SmartMeter HTTP polling

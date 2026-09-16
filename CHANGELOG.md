@@ -5,6 +5,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.4.1] – 2026-09-16
+
+### Fixed
+
+- **`_distribute_data` AttributeError for HTTP-polling users** (fork PR #1): The coordinator
+  blindly called `entity._update_from_coordinator(data)` on all registered sensors.
+  `JackerySmartMeterHttpSensor` only has `_update_from_http`, not `_update_from_coordinator`,
+  so every MQTT message raised an `AttributeError` for any installation with SmartMeter HTTP
+  polling enabled. Fixed with `getattr`-based callable guard.
+
+- **Foreign MQTT messages reset `_last_update_time` prematurely** (fork PR #2): Any MQTT
+  message on a matching wildcard topic updated `_last_update_time` and `_ever_received` before
+  the SN, JSON structure and body type were validated. A foreign device's message on the same
+  broker could therefore suppress the "no data received" warning indefinitely. State flags are
+  now set only after full validation.
+
+- **Topic matching too permissive** (fork PR #2): `re.search` without `re.escape` allowed
+  regex meta-characters in the topic root to match unintended topics. Replaced with
+  `re.fullmatch` + `re.escape` for exact match.
+
+- **Sub-device entity lookup false positives** (fork PR #3): `_entity_keys_for_subdevice`
+  used `f"_{sn}_" in sensor_id` string matching, which produced false positives when one serial
+  number was a substring of another (e.g. "PLUG001" in "PLUG0011"). Replaced with attribute
+  lookup (`_plug_sn` / `_sm_sn`) so only the exact-SN entity is found.
+
+- **MQTT listeners accumulate across HA reloads** (fork PR #5): `ha_mqtt.async_subscribe()`
+  returns an unsubscribe callback that was never stored. Each HA reload therefore added another
+  MQTT listener without cancelling the previous one. The callbacks are now stored in
+  `_mqtt_unsubscribers` and called in `async_stop()`.
+
+- **`_subdevice_sn` accepts non-string values** (fork PR #6): The helper returned whatever
+  `.get()` found, including `int` or `None`. Downstream code assumed `str | None`. Added
+  `isinstance(str)` guard so only real string serial numbers are returned.
+
+- **`bool(int(val))` crashes on non-numeric device data** (fork PR #6): Switch state updates
+  in `switch.py` called `bool(int(val))` without error handling. A non-numeric value (e.g. a
+  string from a malformed MQTT payload) raised `ValueError`/`TypeError`. Wrapped in
+  `try/except (TypeError, ValueError, OverflowError)`.
+
+- **`float()` crashes on non-numeric limit values** (fork PR #6): Number slider min/max updates
+  in `number.py` called `float(data[key])` unguarded. Wrapped in `try/except`.
+
+- **Body sub-device arrays not sanitized** (fork PR #6): The `plugs`, `cts`, `collectors` (and
+  variants) arrays in MQTT bodies were iterated without filtering. Non-dict items or items with
+  unhashable serial numbers could cause downstream errors. Arrays are now sanitized after body
+  validation: non-dict elements and items where `_subdevice_sn` returns `None` are dropped.
+
+- **`_capture_device_meta` called for sub-device messages** (fork PR #6): Device metadata
+  (firmware version, device type) was extracted from every message body regardless of `deviceSn`.
+  This could overwrite the main device's metadata with sub-device fields. Now guarded to only
+  run when the body's `deviceSn` matches `None`, `"system"`, or the main device SN.
+
+---
+
 ## [2.3.0] – unreleased
 
 ### Fixed
