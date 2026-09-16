@@ -88,6 +88,7 @@ def test_expansion_battery_stays_available_after_long_gap():
 
     fake_entity = MagicMock()
     fake_entity.available = False  # currently offline
+    fake_entity._plug_sn = EXP_SN  # _entity_keys_for_subdevice uses attribute lookup
     coord._sensors[f"jackery_battery_{EXP_SN}_foo"] = fake_entity
 
     coord._check_for_new_plugs(payload_with(DUMMY_SN))
@@ -107,6 +108,7 @@ def test_expansion_battery_unavailable_if_never_seen():
 
     fake_entity = MagicMock()
     fake_entity.available = True  # currently falsely marked online
+    fake_entity._plug_sn = EXP_SN  # _entity_keys_for_subdevice uses attribute lookup
     coord._sensors[f"jackery_battery_{EXP_SN}_foo"] = fake_entity
 
     coord._check_for_new_plugs(payload_with(DUMMY_SN))

@@ -1162,7 +1162,8 @@ def should_create_plug_switch(item: dict) -> bool:
 
 def _subdevice_sn(item: dict) -> str | None:
     """Extract device serial number from a sub-device dict (Ü7)."""
-    return item.get("deviceSn") or item.get("sn")
+    sn = item.get("deviceSn") or item.get("sn")
+    return sn if isinstance(sn, str) and sn else None
 
 
 def _merge_subdevice_list(
@@ -1322,6 +1323,7 @@ class JackeryDataCoordinator:
         self._sensors: dict[str, Any] = {}
         self._data_task: asyncio.Task[None] | None = None
         self._subscribed = False
+        self._mqtt_unsubscribers: list[Any] = []
         self._last_update_time = time.time()
         self._start_time = time.time()
 
@@ -1376,21 +1378,23 @@ class JackeryDataCoordinator:
             def message_received(msg):
                 self._handle_message(msg)
 
-            await ha_mqtt.async_subscribe(
+            unsub_status = await ha_mqtt.async_subscribe(
                 self.hass,
                 self._topic_status_wildcard,
                 message_received,
                 1
             )
+            self._mqtt_unsubscribers.append(unsub_status)
             _LOGGER.info(f"Coordinator subscribed to: {self._topic_status_wildcard}")
 
             # Subscribe to event topic for sub-device data (Type 101)
-            await ha_mqtt.async_subscribe(
+            unsub_event = await ha_mqtt.async_subscribe(
                 self.hass,
                 self._topic_event_wildcard,
                 message_received,
                 1
             )
+            self._mqtt_unsubscribers.append(unsub_event)
             _LOGGER.info(f"Coordinator subscribed to: {self._topic_event_wildcard}")
 
             self._subscribed = True
@@ -1421,35 +1425,42 @@ class JackeryDataCoordinator:
                 await self._smartmeter_http_task
             except asyncio.CancelledError:
                 pass
+        for unsub in self._mqtt_unsubscribers:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._mqtt_unsubscribers.clear()
+        self._subscribed = False
         _LOGGER.info("Coordinator stopped")
 
     def _handle_message(self, msg) -> None:
         """处理接收到的 MQTT 消息."""
-        self._last_update_time = time.time()
         try:
             topic = msg.topic
             payload = msg.payload
             if isinstance(payload, bytes):
                 payload = payload.decode("utf-8")
 
-            # Extract device SN from topic: {prefix}/device/{sn}/status OR .../event
-            match = re.search(rf"{self._topic_root}/device/([^/]+)/(status|event)", topic)
-            if match:
-                sn = match.group(1)
-                if not self._device_sn:
-                    self._device_sn = sn
-                    _LOGGER.info(f"Discovered device SN: {self._device_sn}")
-                elif self._device_sn != sn:
-                    # Ü1: ignore messages from other devices on the same broker
-                    _LOGGER.debug(f"Ignoring data from another device: {sn}")
-                    return
-
-            # A valid message for our device arrived → token is accepted, no re-auth needed
-            self._ever_received = True
+            # Extract device SN from topic: {prefix}/device/{sn}/status OR .../event.
+            # Use fullmatch+escape so a topic with extra segments doesn't match,
+            # and so topic_root special characters are treated as literals.
+            match = re.fullmatch(
+                rf"{re.escape(self._topic_root)}/device/([^/]+)/(status|event)", topic
+            )
+            if not match:
+                return
+            sn = match.group(1)
+            if self._device_sn and self._device_sn != sn:
+                # Ü1: ignore messages from other devices on the same broker
+                _LOGGER.debug(f"Ignoring data from another device: {sn}")
+                return
 
             # Parse Payload
             try:
                 raw_data = json.loads(payload)
+                if not isinstance(raw_data, dict):
+                    return
                 msg_code = raw_data.get("type")
                 body = raw_data.get("body")
 
@@ -1462,8 +1473,34 @@ class JackeryDataCoordinator:
                      flat_body = _extract_flat_body(raw_data)
                      body = flat_body if flat_body else {}
 
-                # Capture device model/firmware from first message (Ü2)
-                if isinstance(body, dict):
+                if not isinstance(body, dict):
+                    return
+
+                # Topic and payload are valid for our device — stamp the liveness clock.
+                # Moving this here prevents foreign/malformed messages from resetting
+                # the offline timer before they are fully validated.
+                if not self._device_sn:
+                    self._device_sn = sn
+                    _LOGGER.info(f"Discovered device SN: {self._device_sn}")
+                self._last_update_time = time.time()
+                self._ever_received = True
+
+                # Sanitize child-array fields: drop non-dict list members and reject
+                # scalar/dict values that would corrupt the next list merge.
+                body = dict(body)
+                for _arr_key in ("plugs", "plug", "socket", "sockets", "cts", "ct", "collectors"):
+                    arr = body.get(_arr_key)
+                    if isinstance(arr, list):
+                        body[_arr_key] = [
+                            item for item in arr
+                            if isinstance(item, dict) and (not (item.get("deviceSn") or item.get("sn")) or _subdevice_sn(item))
+                        ]
+                    elif arr is not None:
+                        del body[_arr_key]
+
+                # Capture device model/firmware from host messages only (Ü2)
+                body_sn = body.get("deviceSn")
+                if msg_code in (2, 23, 25, 106, 107) and body_sn in (None, "system", self._device_sn):
                     self._capture_device_meta(raw_data, body)
 
                 # Merge logic
@@ -1736,11 +1773,11 @@ class JackeryDataCoordinator:
         )
 
     def _entity_keys_for_subdevice(self, sn: str) -> list[str]:
-        """Return all registered entity keys (unique_ids) belonging to a sub-device SN."""
+        """Return all registered entity keys belonging to a sub-device SN."""
         return [
             sensor_id
-            for sensor_id in self._sensors
-            if f"_{sn}_" in sensor_id or sensor_id.endswith(f"_{sn}")
+            for sensor_id, entity in self._sensors.items()
+            if getattr(entity, "_plug_sn", None) == sn or getattr(entity, "_sm_sn", None) == sn
         ]
 
     def _remove_subdevice_from_ha(self, sn: str) -> None:
@@ -2200,9 +2237,11 @@ class JackeryDataCoordinator:
         return data
 
     def _distribute_data(self, data: dict) -> None:
-        """分发数据给传感器."""
-        for sensor_id, entity in self._sensors.items():
-            entity._update_from_coordinator(data)
+        """Distribute MQTT data to entities that support the coordinator callback."""
+        for entity in list(self._sensors.values()):
+            update = getattr(entity, "_update_from_coordinator", None)
+            if callable(update):
+                update(data)
 
     def _mark_all_offline(self) -> None:
         """Mark all entities as unavailable."""
