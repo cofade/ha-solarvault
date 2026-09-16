@@ -1091,11 +1091,11 @@ _FLAT_META_KEYS: frozenset[str] = frozenset(
 )
 
 # Real-time power fields shared between type-2 (~11 s) and type-106 (~30 s).
-# type-2 is more current; once the cache has a type-2 reading for these keys,
-# the snapshot values from a type-106 poll must not overwrite them.
-# At startup (empty cache) type-106 is still allowed to populate them so the
-# initial state is available for the ~11 s before the first type-2 arrives.
-_TYPE106_SKIP_IF_ESTABLISHED: frozenset[str] = frozenset({
+# Live readings (type-2, type-107) take priority over type-106 snapshots for
+# OFFLINE_TIMEOUT seconds. After that window, repeated type-106 snapshots may
+# update the field — this allows correction when type-2 stops arriving or when
+# a device firmware emits a field only via type-106.
+_TYPE106_LIVE_PREFERRED: frozenset[str] = frozenset({
     "batInPw", "batOutPw",
     "pvPw", "pv1", "pv2", "pv3", "pv4",
     "swEpsInPw", "swEpsOutPw",
@@ -1157,12 +1157,13 @@ def plug_mqtt_control_allowed(item: dict) -> tuple[bool, str]:
 
 def should_create_plug_switch(item: dict) -> bool:
     """Only create switch entities for smart plugs (devType=6)."""
-    return item.get("devType") in PLUG_ITEM_DEV_TYPES
+    return item.get("devType") == 6
 
 
 def _subdevice_sn(item: dict) -> str | None:
     """Extract device serial number from a sub-device dict (Ü7)."""
-    return item.get("deviceSn") or item.get("sn")
+    sn = item.get("deviceSn") or item.get("sn")
+    return sn if isinstance(sn, str) and sn else None
 
 
 def _merge_subdevice_list(
@@ -1322,6 +1323,7 @@ class JackeryDataCoordinator:
         self._sensors: dict[str, Any] = {}
         self._data_task: asyncio.Task[None] | None = None
         self._subscribed = False
+        self._mqtt_unsubscribers: list[Any] = []
         self._last_update_time = time.time()
         self._start_time = time.time()
 
@@ -1346,7 +1348,12 @@ class JackeryDataCoordinator:
 
         # SmartMeter HTTP polling (optional feature, controlled via options flow)
         self._smartmeter_http_task: asyncio.Task[None] | None = None
-        self._http_sm_sensors_created: bool = False
+        self._http_sm_sensor_sns_created: set[str] = set()
+
+        # Timestamps of the last live (type-2 / type-107) write for each field
+        # in _TYPE106_LIVE_PREFERRED. Used to give live readings priority over
+        # type-106 snapshots for OFFLINE_TIMEOUT seconds.
+        self._type2_live_seen: dict[str, float] = {}
 
         self._topic_status_wildcard = f"{self._topic_root}/device/+/status"
         self._topic_event_wildcard = f"{self._topic_root}/device/+/event"
@@ -1371,21 +1378,23 @@ class JackeryDataCoordinator:
             def message_received(msg):
                 self._handle_message(msg)
 
-            await ha_mqtt.async_subscribe(
+            unsub_status = await ha_mqtt.async_subscribe(
                 self.hass,
                 self._topic_status_wildcard,
                 message_received,
                 1
             )
+            self._mqtt_unsubscribers.append(unsub_status)
             _LOGGER.info(f"Coordinator subscribed to: {self._topic_status_wildcard}")
 
             # Subscribe to event topic for sub-device data (Type 101)
-            await ha_mqtt.async_subscribe(
+            unsub_event = await ha_mqtt.async_subscribe(
                 self.hass,
                 self._topic_event_wildcard,
                 message_received,
                 1
             )
+            self._mqtt_unsubscribers.append(unsub_event)
             _LOGGER.info(f"Coordinator subscribed to: {self._topic_event_wildcard}")
 
             self._subscribed = True
@@ -1416,35 +1425,42 @@ class JackeryDataCoordinator:
                 await self._smartmeter_http_task
             except asyncio.CancelledError:
                 pass
+        for unsub in self._mqtt_unsubscribers:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._mqtt_unsubscribers.clear()
+        self._subscribed = False
         _LOGGER.info("Coordinator stopped")
 
     def _handle_message(self, msg) -> None:
         """处理接收到的 MQTT 消息."""
-        self._last_update_time = time.time()
         try:
             topic = msg.topic
             payload = msg.payload
             if isinstance(payload, bytes):
                 payload = payload.decode("utf-8")
 
-            # Extract device SN from topic: {prefix}/device/{sn}/status OR .../event
-            match = re.search(rf"{self._topic_root}/device/([^/]+)/(status|event)", topic)
-            if match:
-                sn = match.group(1)
-                if not self._device_sn:
-                    self._device_sn = sn
-                    _LOGGER.info(f"Discovered device SN: {self._device_sn}")
-                elif self._device_sn != sn:
-                    # Ü1: ignore messages from other devices on the same broker
-                    _LOGGER.debug(f"Ignoring data from another device: {sn}")
-                    return
-
-            # A valid message for our device arrived → token is accepted, no re-auth needed
-            self._ever_received = True
+            # Extract device SN from topic: {prefix}/device/{sn}/status OR .../event.
+            # Use fullmatch+escape so a topic with extra segments doesn't match,
+            # and so topic_root special characters are treated as literals.
+            match = re.fullmatch(
+                rf"{re.escape(self._topic_root)}/device/([^/]+)/(status|event)", topic
+            )
+            if not match:
+                return
+            sn = match.group(1)
+            if self._device_sn and self._device_sn != sn:
+                # Ü1: ignore messages from other devices on the same broker
+                _LOGGER.debug(f"Ignoring data from another device: {sn}")
+                return
 
             # Parse Payload
             try:
                 raw_data = json.loads(payload)
+                if not isinstance(raw_data, dict):
+                    return
                 msg_code = raw_data.get("type")
                 body = raw_data.get("body")
 
@@ -1457,8 +1473,34 @@ class JackeryDataCoordinator:
                      flat_body = _extract_flat_body(raw_data)
                      body = flat_body if flat_body else {}
 
-                # Capture device model/firmware from first message (Ü2)
-                if isinstance(body, dict):
+                if not isinstance(body, dict):
+                    return
+
+                # Topic and payload are valid for our device — stamp the liveness clock.
+                # Moving this here prevents foreign/malformed messages from resetting
+                # the offline timer before they are fully validated.
+                if not self._device_sn:
+                    self._device_sn = sn
+                    _LOGGER.info(f"Discovered device SN: {self._device_sn}")
+                self._last_update_time = time.time()
+                self._ever_received = True
+
+                # Sanitize child-array fields: drop non-dict list members and reject
+                # scalar/dict values that would corrupt the next list merge.
+                body = dict(body)
+                for _arr_key in ("plugs", "plug", "socket", "sockets", "cts", "ct", "collectors"):
+                    arr = body.get(_arr_key)
+                    if isinstance(arr, list):
+                        body[_arr_key] = [
+                            item for item in arr
+                            if isinstance(item, dict) and (not (item.get("deviceSn") or item.get("sn")) or _subdevice_sn(item))
+                        ]
+                    elif arr is not None:
+                        del body[_arr_key]
+
+                # Capture device model/firmware from host messages only (Ü2)
+                body_sn = body.get("deviceSn")
+                if msg_code in (2, 23, 25, 106, 107) and body_sn in (None, "system", self._device_sn):
                     self._capture_device_meta(raw_data, body)
 
                 # Merge logic
@@ -1466,23 +1508,29 @@ class JackeryDataCoordinator:
                 if msg_code == 23 and isinstance(body, dict):
                     device_sn_in_body = body.get("deviceSn")
                     dev_type_in_body = body.get("devType")
-                    if device_sn_in_body == "system" or device_sn_in_body is None:
+                    # Use _subdevice_sn to support both deviceSn and sn fields.
+                    # Devices with different firmware may use sn-only payloads.
+                    child_sn = _subdevice_sn(body)
+                    is_expansion = dev_type_in_body == 1 and child_sn is not None
+                    is_sn_only_expansion = device_sn_in_body is None and is_expansion
+                    if (device_sn_in_body == "system" or device_sn_in_body is None) and not is_sn_only_expansion:
                         # Merge into main device cache
                         self._merge_normalized_cache(body)
-                    elif dev_type_in_body == 1:
-                        # Expansion battery (e.g. BP2500) — not in type-101, store separately
+                    elif is_expansion:
+                        # Expansion battery (e.g. BP2500) — not in type-101, store separately.
+                        # Use child_sn (deviceSn or sn) so sn-only payloads are routed correctly.
                         exp_bats = self._data_cache.setdefault("expansion_batteries", {})
-                        if device_sn_in_body not in exp_bats:
-                            exp_bats[device_sn_in_body] = {}
+                        if child_sn not in exp_bats:
+                            exp_bats[child_sn] = {}
                         # Only update with non-null values to preserve previously cached real data.
                         # Devices occasionally send null for energy fields (e.g. during a restart);
                         # overwriting with null would cause sensors to show "unknown" until the
                         # next type-23 arrives (~10 min later).
                         for k, v in body.items():
                             if v is not None:
-                                exp_bats[device_sn_in_body][k] = v
+                                exp_bats[child_sn][k] = v
                         # Update last_seen so offline detection doesn't mark them unavailable
-                        self._subdevice_last_seen[device_sn_in_body] = time.time()
+                        self._subdevice_last_seen[child_sn] = time.time()
                         self._check_for_new_expansion_batteries()
                     else:
                         # Find and update sub-device in cache (CTs, SmartMeter)
@@ -1508,18 +1556,24 @@ class JackeryDataCoordinator:
                 # Type 106: Full system state (response to type-105 poll)
                 elif msg_code == 106 and isinstance(body, dict):
                     # Settings (workMode, maxFeedGrid, …): always update.
-                    # Real-time power fields: only populate if not already established
-                    # by a fresher type-2 message — prevents 30 s-stale snapshots
-                    # from overwriting live readings (see _TYPE106_SKIP_IF_ESTABLISHED).
+                    # Real-time power fields (in _TYPE106_LIVE_PREFERRED): skip if a
+                    # live type-2/107 reading arrived within the last OFFLINE_TIMEOUT
+                    # seconds — the live source is fresher than a 30 s-cadence snapshot.
+                    # After the window expires, type-106 may update again (covers devices
+                    # where a field only appears in type-106 or type-2 has stopped).
                     normalized = _normalize_payload_fields(body)
+                    now = time.time()
                     for k, v in normalized.items():
-                        if k not in _TYPE106_SKIP_IF_ESTABLISHED or k not in self._data_cache:
-                            self._data_cache[k] = v
+                        if k in _TYPE106_LIVE_PREFERRED:
+                            last_live = self._type2_live_seen.get(k, 0.0)
+                            if now - last_live < OFFLINE_TIMEOUT:
+                                continue  # live reading is still fresh
+                        self._data_cache[k] = v
                     _LOGGER.debug("Received type-106 system state (%d fields)", len(body))
 
                 # Type 107: Incremental system update (soc, workMode, …)
                 elif msg_code == 107 and isinstance(body, dict):
-                    self._merge_normalized_cache(body)
+                    self._merge_normalized_cache(body, is_live=True)
                     _LOGGER.debug("Received type-107 incremental update: %s", body)
 
                 # Type 123: Auth error from device
@@ -1528,10 +1582,11 @@ class JackeryDataCoordinator:
                     if error_code == 401:
                         self._trigger_reauth("device reported token mismatch (type-123/401)")
 
-                # Type 25 or Status: Main device data
+                # Type 25 or Status: Main device data (type-2 is the primary live source)
                 elif isinstance(body, dict):
-                    # Merge top-level keys into cache to preserve fields not present in current message
-                    self._merge_normalized_cache(body)
+                    # Merge top-level keys into cache to preserve fields not present in current message.
+                    # Mark as live so type-106 snapshots don't overwrite fresher type-2 readings.
+                    self._merge_normalized_cache(body, is_live=True)
 
             except json.JSONDecodeError:
                 _LOGGER.warning(f"Invalid JSON payload on {topic}")
@@ -1549,9 +1604,15 @@ class JackeryDataCoordinator:
         except Exception as e:
             _LOGGER.error(f"Error handling message: {e}")
 
-    def _merge_normalized_cache(self, payload: dict) -> None:
+    def _merge_normalized_cache(self, payload: dict, is_live: bool = False) -> None:
         """Normalize field aliases and merge a main-device payload into the cache."""
-        self._data_cache.update(_normalize_payload_fields(payload))
+        normalized = _normalize_payload_fields(payload)
+        if is_live:
+            now = time.time()
+            for k in normalized:
+                if k in _TYPE106_LIVE_PREFERRED:
+                    self._type2_live_seen[k] = now
+        self._data_cache.update(normalized)
 
     def _merge_subdevice_arrays(self, body: dict) -> bool:
         """Merge plugs/cts/collectors arrays from a body into the cache.
@@ -1712,11 +1773,11 @@ class JackeryDataCoordinator:
         )
 
     def _entity_keys_for_subdevice(self, sn: str) -> list[str]:
-        """Return all registered entity keys (unique_ids) belonging to a sub-device SN."""
+        """Return all registered entity keys belonging to a sub-device SN."""
         return [
             sensor_id
-            for sensor_id in self._sensors
-            if f"_{sn}_" in sensor_id or sensor_id.endswith(f"_{sn}")
+            for sensor_id, entity in self._sensors.items()
+            if getattr(entity, "_plug_sn", None) == sn or getattr(entity, "_sm_sn", None) == sn
         ]
 
     def _remove_subdevice_from_ha(self, sn: str) -> None:
@@ -2176,9 +2237,11 @@ class JackeryDataCoordinator:
         return data
 
     def _distribute_data(self, data: dict) -> None:
-        """分发数据给传感器."""
-        for sensor_id, entity in self._sensors.items():
-            entity._update_from_coordinator(data)
+        """Distribute MQTT data to entities that support the coordinator callback."""
+        for entity in list(self._sensors.values()):
+            update = getattr(entity, "_update_from_coordinator", None)
+            if callable(update):
+                update(data)
 
     def _mark_all_offline(self) -> None:
         """Mark all entities as unavailable."""
@@ -2327,9 +2390,9 @@ class JackeryDataCoordinator:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
-                            if not self._http_sm_sensors_created:
+                            if sm_sn not in self._http_sm_sensor_sns_created:
                                 await self._create_http_sensors(sm_sn)
-                                self._http_sm_sensors_created = True
+                                self._http_sm_sensor_sns_created.add(sm_sn)
                             self._distribute_http_data(sm_sn, data)
                             success = True
                         else:

@@ -33,6 +33,10 @@ def coordinator():
     coord.add_entities_callback = None
     coord.add_switch_entities_callback = None
     coord._data_cache = {}
+    coord._type2_live_seen = {}
+    coord._http_sm_sensor_sns_created = set()
+    coord._smartmeter_http_task = None
+    coord._mqtt_unsubscribers = []
     coord._topic_status_wildcard = "hb/device/+/status"
     coord._topic_event_wildcard = "hb/device/+/event"
     return coord
