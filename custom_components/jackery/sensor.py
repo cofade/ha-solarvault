@@ -1157,7 +1157,7 @@ def plug_mqtt_control_allowed(item: dict) -> tuple[bool, str]:
 
 def should_create_plug_switch(item: dict) -> bool:
     """Only create switch entities for smart plugs (devType=6)."""
-    return item.get("devType") in PLUG_ITEM_DEV_TYPES
+    return item.get("devType") == 6
 
 
 def _subdevice_sn(item: dict) -> str | None:
@@ -1346,7 +1346,7 @@ class JackeryDataCoordinator:
 
         # SmartMeter HTTP polling (optional feature, controlled via options flow)
         self._smartmeter_http_task: asyncio.Task[None] | None = None
-        self._http_sm_sensors_created: bool = False
+        self._http_sm_sensor_sns_created: set[str] = set()
 
         self._topic_status_wildcard = f"{self._topic_root}/device/+/status"
         self._topic_event_wildcard = f"{self._topic_root}/device/+/event"
@@ -2327,9 +2327,9 @@ class JackeryDataCoordinator:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
-                            if not self._http_sm_sensors_created:
+                            if sm_sn not in self._http_sm_sensor_sns_created:
                                 await self._create_http_sensors(sm_sn)
-                                self._http_sm_sensors_created = True
+                                self._http_sm_sensor_sns_created.add(sm_sn)
                             self._distribute_http_data(sm_sn, data)
                             success = True
                         else:
