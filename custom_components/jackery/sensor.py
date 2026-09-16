@@ -1091,11 +1091,11 @@ _FLAT_META_KEYS: frozenset[str] = frozenset(
 )
 
 # Real-time power fields shared between type-2 (~11 s) and type-106 (~30 s).
-# type-2 is more current; once the cache has a type-2 reading for these keys,
-# the snapshot values from a type-106 poll must not overwrite them.
-# At startup (empty cache) type-106 is still allowed to populate them so the
-# initial state is available for the ~11 s before the first type-2 arrives.
-_TYPE106_SKIP_IF_ESTABLISHED: frozenset[str] = frozenset({
+# Live readings (type-2, type-107) take priority over type-106 snapshots for
+# OFFLINE_TIMEOUT seconds. After that window, repeated type-106 snapshots may
+# update the field — this allows correction when type-2 stops arriving or when
+# a device firmware emits a field only via type-106.
+_TYPE106_LIVE_PREFERRED: frozenset[str] = frozenset({
     "batInPw", "batOutPw",
     "pvPw", "pv1", "pv2", "pv3", "pv4",
     "swEpsInPw", "swEpsOutPw",
@@ -1348,6 +1348,11 @@ class JackeryDataCoordinator:
         self._smartmeter_http_task: asyncio.Task[None] | None = None
         self._http_sm_sensor_sns_created: set[str] = set()
 
+        # Timestamps of the last live (type-2 / type-107) write for each field
+        # in _TYPE106_LIVE_PREFERRED. Used to give live readings priority over
+        # type-106 snapshots for OFFLINE_TIMEOUT seconds.
+        self._type2_live_seen: dict[str, float] = {}
+
         self._topic_status_wildcard = f"{self._topic_root}/device/+/status"
         self._topic_event_wildcard = f"{self._topic_root}/device/+/event"
 
@@ -1514,18 +1519,24 @@ class JackeryDataCoordinator:
                 # Type 106: Full system state (response to type-105 poll)
                 elif msg_code == 106 and isinstance(body, dict):
                     # Settings (workMode, maxFeedGrid, …): always update.
-                    # Real-time power fields: only populate if not already established
-                    # by a fresher type-2 message — prevents 30 s-stale snapshots
-                    # from overwriting live readings (see _TYPE106_SKIP_IF_ESTABLISHED).
+                    # Real-time power fields (in _TYPE106_LIVE_PREFERRED): skip if a
+                    # live type-2/107 reading arrived within the last OFFLINE_TIMEOUT
+                    # seconds — the live source is fresher than a 30 s-cadence snapshot.
+                    # After the window expires, type-106 may update again (covers devices
+                    # where a field only appears in type-106 or type-2 has stopped).
                     normalized = _normalize_payload_fields(body)
+                    now = time.time()
                     for k, v in normalized.items():
-                        if k not in _TYPE106_SKIP_IF_ESTABLISHED or k not in self._data_cache:
-                            self._data_cache[k] = v
+                        if k in _TYPE106_LIVE_PREFERRED:
+                            last_live = self._type2_live_seen.get(k, 0.0)
+                            if now - last_live < OFFLINE_TIMEOUT:
+                                continue  # live reading is still fresh
+                        self._data_cache[k] = v
                     _LOGGER.debug("Received type-106 system state (%d fields)", len(body))
 
                 # Type 107: Incremental system update (soc, workMode, …)
                 elif msg_code == 107 and isinstance(body, dict):
-                    self._merge_normalized_cache(body)
+                    self._merge_normalized_cache(body, is_live=True)
                     _LOGGER.debug("Received type-107 incremental update: %s", body)
 
                 # Type 123: Auth error from device
@@ -1534,10 +1545,11 @@ class JackeryDataCoordinator:
                     if error_code == 401:
                         self._trigger_reauth("device reported token mismatch (type-123/401)")
 
-                # Type 25 or Status: Main device data
+                # Type 25 or Status: Main device data (type-2 is the primary live source)
                 elif isinstance(body, dict):
-                    # Merge top-level keys into cache to preserve fields not present in current message
-                    self._merge_normalized_cache(body)
+                    # Merge top-level keys into cache to preserve fields not present in current message.
+                    # Mark as live so type-106 snapshots don't overwrite fresher type-2 readings.
+                    self._merge_normalized_cache(body, is_live=True)
 
             except json.JSONDecodeError:
                 _LOGGER.warning(f"Invalid JSON payload on {topic}")
@@ -1555,9 +1567,15 @@ class JackeryDataCoordinator:
         except Exception as e:
             _LOGGER.error(f"Error handling message: {e}")
 
-    def _merge_normalized_cache(self, payload: dict) -> None:
+    def _merge_normalized_cache(self, payload: dict, is_live: bool = False) -> None:
         """Normalize field aliases and merge a main-device payload into the cache."""
-        self._data_cache.update(_normalize_payload_fields(payload))
+        normalized = _normalize_payload_fields(payload)
+        if is_live:
+            now = time.time()
+            for k in normalized:
+                if k in _TYPE106_LIVE_PREFERRED:
+                    self._type2_live_seen[k] = now
+        self._data_cache.update(normalized)
 
     def _merge_subdevice_arrays(self, body: dict) -> bool:
         """Merge plugs/cts/collectors arrays from a body into the cache.
