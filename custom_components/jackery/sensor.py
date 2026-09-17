@@ -1229,18 +1229,21 @@ def _effective_ongrid_net(
 ) -> float:
     """Net power at the grid-tied port (positive = grid → unit).
 
-    Multi-source: `gridInPw/gridOutPw` (type-106), `inOngridPw/outOngridPw` (type-2)
-    and `inGridSidePw/outGridSidePw` all describe the same port on different firmware
-    revisions.  Only sources actually present in the payload are considered.
+    Priority: inOngridPw/outOngridPw (type-2, live every ~11 s) > inGridSidePw/
+    outGridSidePw > gridInPw/gridOutPw (type-106 alias, cached up to ~30 s).
+
+    gridInPw/gridOutPw are only consulted when the type-2 fields are absent —
+    using them as equal-weight candidates caused stale type-106 cache values to
+    override a correct inOngridPw=0 during standby, making p_home collapse to 0.
     """
-    candidates: list[float] = []
-    if _field_present(data, "gridInPw") or _field_present(data, "gridOutPw"):
-        candidates.append(grid_in - grid_out)
     if _field_present(data, "inOngridPw") or _field_present(data, "outOngridPw"):
-        candidates.append(ongrid_charge - ongrid_supply)
+        return ongrid_charge - ongrid_supply
+    candidates: list[float] = []
     if _field_present(data, "inGridSidePw") or _field_present(data, "outGridSidePw"):
         candidates.append(in_grid_side - out_grid_side)
-    return _pick_best_power_net(candidates)
+    if _field_present(data, "gridInPw") or _field_present(data, "gridOutPw"):
+        candidates.append(grid_in - grid_out)
+    return _pick_best_power_net(candidates) if candidates else ongrid_charge - ongrid_supply
 
 
 def _grid_net_from_system(
