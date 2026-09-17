@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.4.2] – 2026-09-17
+
+### Fixed
+
+- **`p_home` collapses to ~0 W during standby / low-power mode** (Issue #21, regression since
+  v2.3.0): `_effective_ongrid_net` used `_pick_best_power_net` to choose between
+  `inOngridPw/outOngridPw` (type-2, live every ~11 s) and `gridInPw/gridOutPw` (type-106
+  alias, cached up to ~30 s), always picking the largest magnitude. When the inverter enters
+  standby (`inOngridPw=0, outOngridPw=0` — correct), a stale non-zero `gridInPw` from the
+  type-106 cache was picked instead, making `p_ong ≈ p_grid` and therefore `p_home ≈ 0`.
+  Fixed by strict source priority: `inOngridPw/outOngridPw` (type-2) is always used when
+  present; `gridInPw/gridOutPw` is only consulted as a fallback when the type-2 fields are
+  absent.
+
+---
+
 ## [2.4.1] – 2026-09-16
 
 ### Fixed

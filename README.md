@@ -230,6 +230,23 @@ Every push and pull request runs three GitHub Actions jobs automatically:
 
 ---
 
+### What's new in v2.4.2
+
+#### Fix: `jackery_home_power` collapses to ~0 W during standby (Issue #21)
+
+In standby or low-power mode the `jackery_home_power` sensor showed ~0 W instead of the
+real household consumption. Root cause: `_effective_ongrid_net` treated the live type-2
+field `inOngridPw` and the cached type-106 alias `gridInPw` as equal-weight candidates and
+always picked the one with the largest magnitude. When the inverter correctly reported
+`inOngridPw=0` (standby), a stale `gridInPw=300 W` from the type-106 cache won, making
+`p_ong ≈ p_grid` and therefore `p_home ≈ 0`.
+
+Fixed by strict source priority: `inOngridPw/outOngridPw` (type-2, updated every ~11 s)
+is always authoritative when present; the type-106 aliases are only consulted as a
+fallback when the type-2 fields are absent (e.g. on devices that do not send type-2).
+
+---
+
 ### What's new in v2.4.1
 
 #### Robustness fixes backported from community fork analysis
