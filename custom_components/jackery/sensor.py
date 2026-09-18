@@ -55,6 +55,7 @@ DEVICE_STATUS_MAP: dict[int, str] = {
 ONGRID_STATUS_MAP: dict[int, str] = {0: "disconnected", 1: "connected"}
 CT_STATUS_MAP: dict[int, str] = {0: "disconnected", 1: "connected"}
 GRID_METER_LINK_MAP: dict[int, str] = {0: "not_linked", 1: "linked"}
+STORM_WARNING_MAP: dict[int, str] = {0: "inactive", 1: "active"}
 
 # 传感器配置
 SENSORS = {
@@ -636,6 +637,19 @@ SENSORS = {
         "state_class": None,
         "options": list(GRID_METER_LINK_MAP.values()),
         "value_map": GRID_METER_LINK_MAP,
+    },
+    # Storm Warning status (wps field, type-106). Controlled via Jackery Cloud only —
+    # locally always 0 unless a Storm Warning was triggered via the app.
+    # Source: APK decompile v2.4.1, HomeDeviceController.N0() / SYSTEM_STORM_EVENT_SWITCH.
+    "storm_warning_active": {
+        "json_key": "wps",
+        "name": "Storm Warning",
+        "unit": None,
+        "icon": "mdi:weather-lightning",
+        "device_class": SensorDeviceClass.ENUM,
+        "state_class": None,
+        "options": list(STORM_WARNING_MAP.values()),
+        "value_map": STORM_WARNING_MAP,
     },
 
     # Type-106 fields (response to type-105 poll, ~every 5 min)

@@ -64,7 +64,7 @@ async def async_setup_entry(
                 coordinator=coordinator,
                 config_entry_id=config_entry.entry_id,
             ),
-            JackeryOptimisticSwitch(
+            JackeryForceChargeSwitch(
                 key="socForceChg",
                 translation_key="force_charge",
                 coordinator=coordinator,
@@ -334,3 +334,29 @@ class JackeryFollowMeterSwitch(JackeryOptimisticSwitch):
             return
         self._attr_available = True
         self.async_write_ha_state()
+
+
+class JackeryForceChargeSwitch(JackeryOptimisticSwitch):
+    """Force Charge switch — only available when ability bit 11 is set.
+
+    The Jackery app hides the Force Charge toggle unless ability bit 11 is set
+    (confirmed via APK decompile v2.4.1, ChargeDischargeLimitActivity / HomeBody.C0()).
+    Devices without this capability (e.g. older firmware) report ability without bit 11,
+    so this entity is marked unavailable to avoid sending unsupported commands.
+    When ability is not yet known (no type-106 received), the entity remains available
+    (fail-open) so users with supported hardware are not blocked on startup.
+    """
+
+    _ABILITY_BIT = 11
+
+    def _update_from_coordinator(self, data: dict) -> None:
+        ability = data.get("ability")
+        if ability is not None:
+            try:
+                if not ((int(ability) >> self._ABILITY_BIT) & 1):
+                    self._attr_available = False
+                    self.async_write_ha_state()
+                    return
+            except (TypeError, ValueError):
+                pass
+        super()._update_from_coordinator(data)

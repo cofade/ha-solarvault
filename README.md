@@ -230,6 +230,31 @@ Every push and pull request runs three GitHub Actions jobs automatically:
 
 ---
 
+### What's new in v2.4.3
+
+#### Force Charge switch: only shown when supported by device (ability bit 11)
+
+The **Force Charge** switch (`socForceChg`) is now hidden (unavailable) on devices
+where the Jackery app also hides it. The Jackery app gates this feature on `ability`
+bit 11 in the type-106 response (source: APK decompile v2.4.1). Devices with
+`ability` values 768 or below (bits 8+9 only) do not support Force Charge;
+the entity becomes available as soon as a type-106 message with bit 11 set is received.
+
+#### Max Feed-in Power number: only shown when supported by device (ability bit 9)
+
+The **Max Feed-in Power** number (`maxOutPw`) is now hidden (unavailable) on devices
+where the Jackery app also hides the Max Output Power setting. Gated on `ability` bit 9
+(source: APK decompile v2.4.1).
+
+#### New sensor: Storm Warning status
+
+A new **Storm Warning** sensor (`storm_warning_active`) exposes the `wps` field
+from type-2/106 messages as an ENUM sensor (Inactive / Active). Storm Warning is
+controlled exclusively via the Jackery cloud (BLE/Cloud MQTT only — not reachable
+via local MQTT). The sensor shows whether a storm warning is currently active.
+
+---
+
 ### What's new in v2.4.2
 
 #### Fix: `jackery_home_power` collapses to ~0 W during standby (Issue #21)

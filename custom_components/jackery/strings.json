@@ -170,6 +170,13 @@
                     "linked": "Linked"
                 }
             },
+            "storm_warning_active": {
+                "name": "Storm Warning",
+                "state": {
+                    "inactive": "Inactive",
+                    "active": "Active"
+                }
+            },
             "other_load_power": {"name": "Home Load Power (Estimated)"},
             "grid_in_power": {"name": "Grid AC Input Power"},
             "grid_out_power": {"name": "Grid AC Output Power"},

@@ -310,6 +310,13 @@
                     "linked": "Lié"
                 }
             },
+            "storm_warning_active": {
+                "name": "Alerte météo",
+                "state": {
+                    "inactive": "Inactive",
+                    "active": "Active"
+                }
+            },
             "other_load_power": {
                 "name": "Consommation de la maison (estimée)"
             },

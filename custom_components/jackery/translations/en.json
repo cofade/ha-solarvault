@@ -310,6 +310,13 @@
                     "linked": "Linked"
                 }
             },
+            "storm_warning_active": {
+                "name": "Storm Warning",
+                "state": {
+                    "inactive": "Inactive",
+                    "active": "Active"
+                }
+            },
             "other_load_power": {
                 "name": "Home Load Power (Estimated)"
             },

@@ -310,6 +310,13 @@
                     "linked": "Verbunden"
                 }
             },
+            "storm_warning_active": {
+                "name": "Sturmwarnung",
+                "state": {
+                    "inactive": "Inaktiv",
+                    "active": "Aktiv"
+                }
+            },
             "other_load_power": {
                 "name": "Hausverbrauch (Geschätzt)"
             },

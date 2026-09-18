@@ -42,10 +42,13 @@ NUMBERS = {
     # maxOutPw: maximum OnGrid AC output power (Einspeiseleistung).
     # Live MQTT test (2026-08-06) confirmed the device accepts and enforces arbitrary
     # values in 10 W steps — not limited to the app's preset options (800/1200/2500 W).
+    # ability bit 9 gates the Max Output Power setting in the Jackery app.
+    # Source: APK decompile v2.4.1, HomeBody.java.
     "maxOutPw": {
         "translation_key": "max_feed_in_power",
         "min": 0, "max": 2500, "step": 10,
         "unit": UnitOfPower.WATT, "optimistic": True,
+        "ability_bit": 9,
     },
     # maxFeedGrid: public grid export cap — limits how much power the SolarVault
     # may export to the PUBLIC electricity grid (not the house AC bus).
@@ -146,6 +149,20 @@ class JackeryMainNumber(NumberEntity):
     def _update_from_coordinator(self, data: dict) -> None:
         cfg = NUMBERS.get(self._key, {})
         changed = False
+
+        ability_bit = cfg.get("ability_bit")
+        if ability_bit is not None:
+            assert isinstance(ability_bit, int)
+            ability = data.get("ability")
+            if ability is not None:
+                try:
+                    if not ((int(ability) >> ability_bit) & 1):
+                        if self._attr_available:
+                            self._attr_available = False
+                            self.async_write_ha_state()
+                        return
+                except (TypeError, ValueError):
+                    pass
 
         min_key = cfg.get("min_key")
         if min_key and min_key in data:
