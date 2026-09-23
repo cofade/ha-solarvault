@@ -58,7 +58,7 @@ GRID_METER_LINK_MAP: dict[int, str] = {0: "not_linked", 1: "linked"}
 STORM_WARNING_MAP: dict[int, str] = {0: "inactive", 1: "active"}
 
 # 传感器配置
-SENSORS = {
+SENSORS: dict[str, dict[str, Any]] = {
     # 电池相关
     "battery_soc": {
         "json_key": "batSoc",
@@ -755,7 +755,7 @@ SENSORS = {
 }
 
 # 子设备传感器配置
-SUBDEVICE_SENSORS = {
+SUBDEVICE_SENSORS: dict[str, dict[str, dict[str, Any]]] = {
     # 智能插座 (devType=6 or 1)
     "plug": {
         "power": {
@@ -1374,6 +1374,7 @@ class JackeryDataCoordinator:
 
         self._topic_status_wildcard = f"{self._topic_root}/device/+/status"
         self._topic_event_wildcard = f"{self._topic_root}/device/+/event"
+        self._topic_alert_wildcard = f"{self._topic_root}/device/+/alert"
 
     def register_sensor(self, sensor_id: str, entity: Any) -> None:
         """Register any HA entity that implements _update_from_coordinator."""
@@ -1414,6 +1415,20 @@ class JackeryDataCoordinator:
             self._mqtt_unsubscribers.append(unsub_event)
             _LOGGER.info(f"Coordinator subscribed to: {self._topic_event_wildcard}")
 
+            # Subscribe to alert topic for device alarms (Storm Warning, fault events)
+            @callback
+            def alert_received(msg):
+                self._handle_alert_message(msg)
+
+            unsub_alert = await ha_mqtt.async_subscribe(
+                self.hass,
+                self._topic_alert_wildcard,
+                alert_received,
+                1
+            )
+            self._mqtt_unsubscribers.append(unsub_alert)
+            _LOGGER.info(f"Coordinator subscribed to: {self._topic_alert_wildcard}")
+
             self._subscribed = True
 
             # 启动定时轮询
@@ -1450,6 +1465,64 @@ class JackeryDataCoordinator:
         self._mqtt_unsubscribers.clear()
         self._subscribed = False
         _LOGGER.info("Coordinator stopped")
+
+    @callback
+    def _handle_alert_message(self, msg) -> None:
+        """Handle incoming messages on hb/device/{sn}/alert.
+
+        Fires a 'jackery_alert' event on the HA bus so users can build
+        automations on device alarms (fault codes, Storm Warning activation, …).
+
+        Event data keys:
+          device_sn  – serial number of the reporting device
+          alert_id   – numeric alert type code (alertId)
+          record_ts  – Unix timestamp from the device (recordTs)
+          status     – alert status (optional, Storm Warning)
+          start_ts   – storm warning start timestamp (optional)
+          end_ts     – storm warning end timestamp (optional)
+          manual     – manually triggered flag (optional)
+        """
+        try:
+            topic = msg.topic
+            payload = msg.payload
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8")
+
+            match = re.fullmatch(
+                rf"{re.escape(self._topic_root)}/device/([^/]+)/alert", topic
+            )
+            if not match:
+                return
+            sn = match.group(1)
+            if self._device_sn and self._device_sn != sn:
+                return
+
+            data = json.loads(payload)
+            if not isinstance(data, dict):
+                return
+
+            # Support both wrapped {"body": {...}} and flat payloads
+            body = data.get("body")
+            if not isinstance(body, dict):
+                body = data
+
+            event_data: dict[str, Any] = {
+                "device_sn": sn,
+                "alert_id": body.get("alertId"),
+                "record_ts": body.get("recordTs"),
+            }
+            # Optional fields present in Storm Warning alerts
+            for opt_key in ("status", "startTs", "endTs", "manual"):
+                if opt_key in body:
+                    event_data[opt_key] = body[opt_key]
+
+            self.hass.bus.async_fire("jackery_alert", event_data)
+            _LOGGER.info(
+                "Jackery alert fired: device_sn=%s alert_id=%s",
+                sn, event_data.get("alert_id")
+            )
+        except Exception as e:
+            _LOGGER.warning("Error handling alert message on %s: %s", msg.topic, e)
 
     def _handle_message(self, msg) -> None:
         """处理接收到的 MQTT 消息."""
@@ -2481,10 +2554,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up Jackery sensors."""
     config = config_entry.data
-    topic_prefix = config.get("topic_prefix", "hb")
-    token = config.get("token")
-    mqtt_host = config.get("mqtt_host")
-    device_sn = config.get("device_sn")
+    topic_prefix = str(config.get("topic_prefix", "hb") or "hb")
+    token = str(config.get("token") or "")
+    mqtt_host = str(config.get("mqtt_host") or "")
+    device_sn = str(config.get("device_sn") or "")
 
     coordinator = JackeryDataCoordinator(hass, topic_prefix, token, mqtt_host, device_sn)
     coordinator.config_entry_id = config_entry.entry_id
@@ -2710,11 +2783,12 @@ class JackerySubDeviceSensor(SensorEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        # Register with coordinator using a unique ID format
-        self._coordinator.register_sensor(self._attr_unique_id, self)
+        if self._attr_unique_id is not None:
+            self._coordinator.register_sensor(self._attr_unique_id, self)
 
     async def async_will_remove_from_hass(self) -> None:
-        self._coordinator.unregister_sensor(self._attr_unique_id)
+        if self._attr_unique_id is not None:
+            self._coordinator.unregister_sensor(self._attr_unique_id)
         await super().async_will_remove_from_hass()
 
     def _update_from_coordinator(self, data: dict) -> None:

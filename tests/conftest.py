@@ -39,6 +39,7 @@ def coordinator():
     coord._mqtt_unsubscribers = []
     coord._topic_status_wildcard = "hb/device/+/status"
     coord._topic_event_wildcard = "hb/device/+/event"
+    coord._topic_alert_wildcard = "hb/device/+/alert"
     return coord
 
 

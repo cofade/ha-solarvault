@@ -230,6 +230,66 @@ Every push and pull request runs three GitHub Actions jobs automatically:
 
 ---
 
+### What's new in v2.5.0
+
+#### Alert-Topic subscription: `jackery_alert` Home Assistant event
+
+The integration now subscribes to the `hb/device/{SN}/alert` MQTT topic.
+Whenever the SolarVault publishes an alert message (fault events, Storm Warning
+activation/deactivation, threshold alarms), a `jackery_alert` event is fired on
+the Home Assistant event bus — ready to trigger automations without polling.
+
+**Event data fields:**
+
+| Field | Description |
+|-------|-------------|
+| `device_sn` | Serial number of the reporting device |
+| `alert_id` | Numeric alert/alarm code (`alertId`) |
+| `record_ts` | Unix timestamp of when the event was recorded (`recordTs`) |
+| `status` | Alert status, when present |
+| `startTs` | Start timestamp of the alert period, when present |
+| `endTs` | End timestamp of the alert period, when present |
+| `manual` | Manual trigger flag, when present |
+
+**Example automation trigger:**
+
+```yaml
+trigger:
+  - platform: event
+    event_type: jackery_alert
+    event_data:
+      device_sn: "YOUR_DEVICE_SN"
+```
+
+No new sensors are created — alert messages are transient events, not persistent state. The topic was previously not subscribed at all.
+
+#### Battery sensor scope clarifications (firmware-confirmed)
+
+Firmware reverse-engineering of the SolarVault 3 Pro Max (BEMS0002 / STM32H7) and
+the BP2500 BMS (HTP0013-BMS00002 / STM32 Cortex-M) confirmed the following, which
+are now reflected in the sensor descriptions:
+
+- **`battery_charge_power` / `battery_discharge_power` (batInPw / batOutPw):** Measure
+  the **main SolarVault unit only**. The BP2500 has a separate Coulomb Counter that is
+  not exposed as a real-time MQTT field. This explains the 200–300 W divergence observed
+  when the BP2500 is actively charging or discharging alongside the main unit. The
+  `total_battery_charge_power` / `total_battery_discharge_power` sensors (energy balance)
+  remain the correct choice for full-stack power monitoring.
+
+- **BP2500 individual SOC:** The BP2500's per-unit SOC (`tSoc`) is transmitted to the
+  main controller via the internal CAN bus and feeds the combined `soc` field, but is
+  **never published separately via MQTT**. This is an architectural limitation of the
+  firmware — it is not a missing feature that a future firmware update could expose without
+  protocol changes. The combined `bms_soc` sensor remains the best available SOC indicator
+  for multi-unit setups.
+
+- **`expansion_battery_charge_energy` / `expansion_battery_discharge_energy` (inEgy / outEgy
+  from type-23):** These cumulative counters come directly from the BP2500's on-board
+  Coulomb Counter and are fully reliable. Home Assistant's `TOTAL_INCREASING` handling
+  is correct for these sensors.
+
+---
+
 ### What's new in v2.4.3
 
 #### Force Charge switch: only shown when supported by device (ability bit 11)
@@ -337,7 +397,7 @@ The "Max Feed-in Power (OnGrid)" entity (`maxOutPw`) was previously a Select wit
 
 #### Total Battery Power via energy balance
 
-`battery_charge_power` and `battery_discharge_power` cover the **main SolarVault unit only** — the MQTT protocol does not expose real-time power data for expansion batteries such as the BP2500 separately.
+`battery_charge_power` and `battery_discharge_power` cover the **main SolarVault unit only** — the MQTT protocol does not expose real-time power data for expansion batteries such as the BP2500 separately. This is an architectural limitation confirmed by firmware reverse-engineering (see v2.5.0 notes).
 
 Two new sensors derive the **full-stack** battery power from the energy balance formula
 `PV + grid_import − AC_output − EPS_output`:

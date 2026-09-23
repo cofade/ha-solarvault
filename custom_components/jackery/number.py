@@ -1,6 +1,6 @@
 """Jackery Number Platform."""
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-NUMBERS = {
+NUMBERS: dict[str, dict[str, Any]] = {
     "socChgLimit": {
         "translation_key": "soc_charge_limit",
         "min": 50, "max": 100, "step": 1,

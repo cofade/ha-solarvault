@@ -15,5 +15,11 @@ FORUM_de.md
 FORUM_en.md
 CLAUDE.md
 
+# Local Claude Code settings (contain tokens/paths)
+.claude/settings.local.json
+
+# Qdrant project memory (local vector DB, not for repo)
+.memory/
+
 # Local documentation (not for public repo)
 docs/*.pdf
