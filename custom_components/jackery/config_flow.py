@@ -95,7 +95,7 @@ class JackeryConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: igno
         )
 
 
-class JackeryOptionsFlowHandler(config_entries.OptionsFlow):
+class JackeryOptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Handle Jackery options."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
@@ -109,6 +109,17 @@ class JackeryOptionsFlowHandler(config_entries.OptionsFlow):
         current_options = self._config_entry.options
 
         if user_input is not None:
+            new_options = {
+                "smartmeter_http_poll": user_input["smartmeter_http_poll"],
+                "smartmeter_poll_interval": user_input["smartmeter_poll_interval"],
+            }
+            options_changed = any(
+                new_options[key] != current_options.get(key, default)
+                for key, default in (
+                    ("smartmeter_http_poll", False),
+                    ("smartmeter_poll_interval", DEFAULT_SMARTMETER_POLL_INTERVAL),
+                )
+            )
             data_updates: dict[str, Any] = {}
             if user_input["token"] != current_data.get("token"):
                 data_updates["token"] = user_input["token"]
@@ -118,12 +129,15 @@ class JackeryOptionsFlowHandler(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(
                     self._config_entry, data={**current_data, **data_updates}
                 )
+                # OptionsFlowWithReload only reloads when options change; trigger reload
+                # explicitly for data-only changes (token / topic_prefix).
+                if not options_changed:
+                    self.hass.config_entries.async_schedule_reload(
+                        self._config_entry.entry_id
+                    )
             return self.async_create_entry(
                 title="",
-                data={
-                    "smartmeter_http_poll": user_input["smartmeter_http_poll"],
-                    "smartmeter_poll_interval": user_input["smartmeter_poll_interval"],
-                },
+                data=new_options if options_changed else dict(current_options),
             )
 
         schema = vol.Schema(
