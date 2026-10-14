@@ -1831,6 +1831,8 @@ class JackeryDataCoordinator:
             self._device_type = int(device_type)
             changed = True
         soft_ver = body.get("softver")
+        if soft_ver is None:
+            soft_ver = raw_data.get("softver")
         if soft_ver is not None and soft_ver != self._soft_ver:
             self._soft_ver = str(soft_ver)
             changed = True
@@ -2429,18 +2431,20 @@ class JackeryDataCoordinator:
                 _LOGGER.warning("Error polling full system state (type-105): %s", e)
 
         # 3. Poll sub-devices (type-100): CTs (2), SmartMeter 3P (3), Plugs (6)
-        try:
-            for dev_type in [2, 3, 6]:
-                payload_100 = {
-                    "type": 100, "eventId": 0,
-                    "messageId": random.randint(1000, 9999),
-                    "ts": ts, "token": self._token,
-                    "body": {"devType": dev_type},
-                }
+        # Each category is isolated so a publish failure for one does not suppress the others.
+        for dev_type in [2, 3, 6]:
+            payload_100 = {
+                "type": 100, "eventId": 0,
+                "messageId": random.randint(1000, 9999),
+                "ts": ts, "token": self._token,
+                "body": {"devType": dev_type},
+            }
+            try:
                 await ha_mqtt.async_publish(self.hass, action_topic, json.dumps(payload_100), 0, False)
-                await asyncio.sleep(0.5)
-        except Exception as e:
-            _LOGGER.warning("Error polling sub-devices (type-100): %s", e)
+            except Exception as e:
+                _LOGGER.warning("Error polling sub-device category (type-100 devType=%s): %s", dev_type, e)
+                continue
+            await asyncio.sleep(0.5)
 
         _LOGGER.debug("Sent poll requests to %s", action_topic)
 

@@ -230,6 +230,18 @@ Every push and pull request runs three GitHub Actions jobs automatically:
 
 ---
 
+### What's new in v2.5.1
+
+Three robustness fixes backported from the community fork analysis:
+
+- **Sub-device poll isolation:** A publish failure for one sub-device category (CTs, SmartMeter 3P, Plugs) no longer prevents the remaining categories from being polled in the same cycle. Previously a single error in the loop silently skipped all remaining devTypes.
+
+- **Firmware version top-level fallback:** `_capture_device_meta` now also reads `softver` from the MQTT message envelope (top level) if it is absent from the message body. Fixes devices that report firmware version outside the standard body field.
+
+- **Options flow reloads integration correctly:** `JackeryOptionsFlowHandler` now inherits from `OptionsFlowWithReload` (HA ≥ 2025.8.0). Changing options (SmartMeter HTTP poll settings) now automatically reloads the integration. Token and topic_prefix changes also trigger a reload, fixing a split-brain where the old coordinator remained subscribed to the stale topic after saving.
+
+---
+
 ### What's new in v2.5.0
 
 #### Alert-Topic subscription: `jackery_alert` Home Assistant event
