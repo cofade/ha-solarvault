@@ -275,6 +275,7 @@ def test_type123_error_401_triggers_reauth(coordinator):
     from unittest.mock import MagicMock
     coordinator.hass = MagicMock()
     coordinator.config_entry_id = "test_entry_id"
+    coordinator._lifecycle_active = True  # simulate running coordinator
 
     send(coordinator, TOPIC_STATUS, {
         "type": 123,

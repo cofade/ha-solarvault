@@ -30,6 +30,8 @@ def coordinator():
     coord._soft_ver = None
     coord._reauth_started = False
     coord._ever_received = False
+    coord._lifecycle_active = False
+    coord._stop_requested = False
     coord.add_entities_callback = None
     coord.add_switch_entities_callback = None
     coord._data_cache = {}

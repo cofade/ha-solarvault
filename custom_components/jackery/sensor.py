@@ -1359,6 +1359,8 @@ class JackeryDataCoordinator:
 
         # Re-Auth guard — prevents multiple simultaneous re-auth flows
         self._reauth_started: bool = False
+        self._lifecycle_active: bool = False
+        self._stop_requested: bool = False
         # True as soon as one valid message for this device SN was received (re-auth heuristic)
         self._ever_received: bool = False
         self.config_entry_id: str = ""  # set by async_setup_entry
@@ -1389,6 +1391,7 @@ class JackeryDataCoordinator:
         """启动协调器."""
         if self._subscribed:
             return
+        self._stop_requested = False
 
         try:
             # 订阅状态主题 (Wildcard) 以发现设备和接收数据
@@ -1430,6 +1433,7 @@ class JackeryDataCoordinator:
             _LOGGER.info(f"Coordinator subscribed to: {self._topic_alert_wildcard}")
 
             self._subscribed = True
+            self._lifecycle_active = not self._stop_requested
 
             # 启动定时轮询
             self._data_task = asyncio.create_task(self._periodic_data_request())
@@ -1445,6 +1449,8 @@ class JackeryDataCoordinator:
 
     async def async_stop(self) -> None:
         """停止协调器."""
+        self._stop_requested = True
+        self._lifecycle_active = False
         if self._data_task and not self._data_task.done():
             self._data_task.cancel()
             try:
@@ -1852,18 +1858,15 @@ class JackeryDataCoordinator:
 
     def _trigger_reauth(self, reason: str) -> None:
         """Initiate a re-authentication flow in HA (Re-Auth feature)."""
-        if self._reauth_started:
+        if self._reauth_started or not self._lifecycle_active:
+            return
+        entry = self.hass.config_entries.async_get_entry(self.config_entry_id)
+        if entry is None:
+            _LOGGER.debug("Skipping re-authentication for missing config entry %s", self.config_entry_id)
             return
         self._reauth_started = True
         _LOGGER.warning("Triggering re-authentication: %s", reason)
-        from homeassistant.config_entries import SOURCE_REAUTH
-        self.hass.async_create_task(
-            self.hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": SOURCE_REAUTH, "entry_id": self.config_entry_id},
-                data={},
-            )
-        )
+        entry.async_start_reauth(self.hass)
 
     def _entity_keys_for_subdevice(self, sn: str) -> list[str]:
         """Return all registered entity keys belonging to a sub-device SN."""
@@ -2879,7 +2882,10 @@ class JackerySubDeviceSensor(SensorEntity):
                         a_pw = my_plug.get("AphasePw") or my_plug.get("aPhasePw") or 0
                         b_pw = my_plug.get("BphasePw") or my_plug.get("bPhasePw") or 0
                         if any(v is not None for v in [a_pw, b_pw]):
-                            val = float(a_pw) + float(b_pw)
+                            try:
+                                val = float(a_pw) + float(b_pw)
+                            except (TypeError, ValueError, OverflowError):
+                                return
                 else:
                     val = my_plug.get("TphasePw") or my_plug.get("tPhasePw")
             else:
@@ -2894,7 +2900,10 @@ class JackerySubDeviceSensor(SensorEntity):
                         a_egy = my_plug.get("AphaseEgy") or my_plug.get("aPhaseEgy") or 0
                         b_egy = my_plug.get("BphaseEgy") or my_plug.get("bPhaseEgy") or 0
                         if any(v is not None for v in [a_egy, b_egy]):
-                            val = float(a_egy) + float(b_egy)
+                            try:
+                                val = float(a_egy) + float(b_egy)
+                            except (TypeError, ValueError, OverflowError):
+                                return
                 else:
                     val = my_plug.get("TphaseEgy") or my_plug.get("tPhaseEgy")
                 # If subtype energy is zero/None but total is non-zero, fall back to the single non-zero phase
