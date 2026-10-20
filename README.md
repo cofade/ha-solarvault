@@ -230,6 +230,16 @@ Every push and pull request runs three GitHub Actions jobs automatically:
 
 ---
 
+### What's new in v2.5.2
+
+Two robustness fixes backported from community fork analysis (fred-head fork, PRs #25/#43):
+
+- **CT phase power guard:** `float(a_pw) + float(b_pw)` in the sub_type=3 plug update path now has a `try/except` guard. A non-numeric value from the device no longer crashes the update call for that entity.
+
+- **Reauth lifecycle hardening:** The re-authentication flow is no longer triggered when the coordinator is stopping or already stopped. Uses the modern `entry.async_start_reauth(hass)` API (HA ≥ 2024.x) instead of the manual flow init approach, plus a guard against a missing config entry.
+
+---
+
 ### What's new in v2.5.1
 
 Three robustness fixes backported from the community fork analysis:
